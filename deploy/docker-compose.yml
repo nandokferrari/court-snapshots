@@ -20,6 +20,8 @@ services:
     volumes:
       - snapshots:/snapshots
       - ./vsftpd.conf:/etc/vsftpd/vsftpd.conf
+    env_file:
+      - ../.env
     environment:
       - PASV_ADDRESS=${VPS_PUBLIC_IP}
 
