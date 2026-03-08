@@ -1,0 +1,40 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: always
+    ports:
+      - "8080:8080"
+    volumes:
+      - snapshots:/snapshots
+    env_file:
+      - ../.env
+
+  vsftpd:
+    image: fauria/vsftpd
+    restart: always
+    ports:
+      - "21:21"
+      - "30000-30100:30000-30100"
+    volumes:
+      - snapshots:/snapshots
+      - ./vsftpd.conf:/etc/vsftpd/vsftpd.conf
+    environment:
+      - PASV_ADDRESS=${VPS_PUBLIC_IP}
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+
+volumes:
+  snapshots:
+  letsencrypt:
+  certbot-www:
