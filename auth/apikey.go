@@ -12,14 +12,18 @@ func RequireAPIKey(apiKey string) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-				return
+			var token string
+			if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+				t, ok := strings.CutPrefix(authHeader, "Bearer ")
+				if ok {
+					token = t
+				}
+			}
+			if token == "" {
+				token = r.URL.Query().Get("key")
 			}
 
-			token, ok := strings.CutPrefix(authHeader, "Bearer ")
-			if !ok || subtle.ConstantTimeCompare([]byte(token), keyBytes) != 1 {
+			if token == "" || subtle.ConstantTimeCompare([]byte(token), keyBytes) != 1 {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 				return
 			}
