@@ -2,9 +2,9 @@ package storage
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -51,9 +51,8 @@ func (s *DiskStorage) GetLatestSnapshot(courtID string) (string, error) {
 		return "", fmt.Errorf("no snapshot available")
 	}
 
-	sort.Strings(images)
-	oldest := images[0]
-	return filepath.Join(dir, oldest), nil
+	pick := images[rand.Intn(len(images))]
+	return filepath.Join(dir, pick), nil
 }
 
 func (s *DiskStorage) DeleteFile(filePath string) error {
