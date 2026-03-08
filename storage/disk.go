@@ -52,25 +52,10 @@ func (s *DiskStorage) GetLatestSnapshot(courtID string) (string, error) {
 	}
 
 	sort.Strings(images)
-	latest := images[len(images)-1]
-	return filepath.Join(dir, latest), nil
+	oldest := images[0]
+	return filepath.Join(dir, oldest), nil
 }
 
-func (s *DiskStorage) CleanupSnapshots(courtID string) error {
-	dir := s.CourtDir(courtID)
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
-			return err
-		}
-	}
-	return nil
+func (s *DiskStorage) DeleteFile(filePath string) error {
+	return os.Remove(filePath)
 }

@@ -52,8 +52,8 @@ func (h *SnapshotHandler) ServeLatest(w http.ResponseWriter, r *http.Request) {
 
 	if h.DeleteAfterServe {
 		go func() {
-			if err := h.Storage.CleanupSnapshots(courtID); err != nil {
-				log.Printf("error cleaning up snapshots for court %s: %v", courtID, err)
+			if err := h.Storage.DeleteFile(filePath); err != nil {
+				log.Printf("error deleting snapshot %s: %v", filePath, err)
 			}
 		}()
 	}
