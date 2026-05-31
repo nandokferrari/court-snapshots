@@ -14,29 +14,20 @@ services:
   vsftpd:
     image: fauria/vsftpd
     restart: always
+    entrypoint: ["/vsftpd-entrypoint.sh"]
     ports:
       - "21:21"
       - "30000-30100:30000-30100"
     volumes:
       - snapshots:/snapshots
-      - ./vsftpd.conf:/etc/vsftpd/vsftpd.conf
-    env_file:
-      - ../.env
+      - ./vsftpd-entrypoint.sh:/vsftpd-entrypoint.sh
+      - ./user_conf:/etc/vsftpd/user_conf
     environment:
-      - PASV_ADDRESS=${VPS_PUBLIC_IP}
-
-  nginx:
-    image: nginx:alpine
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf
-      - letsencrypt:/etc/letsencrypt
-      - certbot-www:/var/www/certbot
+      - FTP_USER=cam_mock
+      - FTP_PASS=MockCourt2026x
+      - PASV_ADDRESS=192.241.136.122
+      - PASV_MIN_PORT=30000
+      - PASV_MAX_PORT=30100
 
 volumes:
   snapshots:
-  letsencrypt:
-  certbot-www:

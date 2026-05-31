@@ -28,6 +28,9 @@ func New(cfg *config.Config) *http.Server {
 
 	authMiddleware := auth.RequireAPIKey(cfg.APIKey)
 	mux.Handle("GET /snapshots/{courtId}/latest", authMiddleware(http.HandlerFunc(snapshotHandler.ServeLatest)))
+	mux.Handle("GET /snapshots/{courtId}/list", authMiddleware(http.HandlerFunc(snapshotHandler.ListSnapshots)))
+	mux.Handle("GET /snapshots/{courtId}/file/{filename}", authMiddleware(http.HandlerFunc(snapshotHandler.ServeFile)))
+	mux.Handle("GET /snapshots/{courtId}/thumbnails", authMiddleware(http.HandlerFunc(snapshotHandler.ServeThumbnails)))
 
 	loggedMux := loggingMiddleware(mux)
 
