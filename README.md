@@ -6,23 +6,24 @@ Servidor standalone em Go que recebe snapshots de cameras IP via FTP e serve a i
 
 ```
                         FTP (porta 21)                  HTTP GET
-  Cameras Intelbras  ──────────────────>  vsftpd  ──>  Go API  ──>  Nginx (HTTPS)
-  (upload periodico)                      (chroot       (serve       (reverse proxy
-                                          por user)     latest)      + SSL)
+  Cameras / ESP32    ──────────────────>  vsftpd  ──>  Go API
+  (upload periodico)                      (virtual       (serve
+                                          users +        latest)
+                                          per-user
+                                          local_root)
                                               │             │
                                               v             v
-                                         /snapshots/    Responde ao
-                                         court-{id}/    analyze-court
-                                         *.jpg          com a imagem
+                                         /snapshots/    Responde com
+                                         court-{id}/    a imagem mais
+                                         *.jpg          recente
 ```
 
 **Passo a passo:**
 
-1. Cada camera faz upload periodico de snapshots via FTP para a VPS
-2. O vsftpd recebe os arquivos — cada camera tem credencial propria e fica isolada (chroot) na pasta da sua quadra
+1. Cada camera/ESP faz upload periodico de snapshots via FTP para a VPS
+2. O vsftpd recebe os arquivos — cada camera tem credencial propria e o `local_root` por usuario direciona os uploads para `/snapshots/court-{uuid}/`
 3. O pipeline de IA chama `GET /snapshots/:courtId/latest` com autenticacao via API key
-4. O servidor Go localiza a imagem `.jpg` mais recente no diretorio da quadra, retorna como `image/jpeg`
-5. Apos servir, todos os arquivos da quadra sao deletados em background (evita acumulo em disco)
+4. O servidor Go localiza a imagem `.jpg` mais recente no diretorio da quadra, valida que o JPEG esta completo (marcador `FF D9`), e retorna como `image/jpeg`
 
 ## Arquitetura
 
@@ -34,70 +35,88 @@ court-snapshots/
 ├── server/
 │   └── server.go            # HTTP server, rotas e logging middleware
 ├── handler/
-│   └── snapshot.go          # Handler GET /snapshots/:courtId/latest
+│   └── snapshot.go          # Handlers: latest, list, file, thumbnails
 ├── storage/
-│   └── disk.go              # Leitura do snapshot mais recente + cleanup
+│   └── disk.go              # Leitura de snapshots, validacao JPEG, listagem
 ├── auth/
 │   └── apikey.go            # Middleware de autenticacao por API key
 ├── ftpusers/
 │   └── manage.sh            # Script para criar/remover users FTP
 ├── deploy/
 │   ├── Dockerfile           # Multi-stage build (Go -> Alpine)
-│   ├── docker-compose.yml   # App + vsftpd + Nginx
-│   ├── nginx.conf           # Reverse proxy com HTTPS
-│   ├── vsftpd.conf          # Configuracao do servidor FTP
-│   └── certbot-renew.sh     # Renovacao automatica de certificado SSL
+│   ├── docker-compose.yml   # App + vsftpd
+│   ├── vsftpd.conf          # Configuracao do servidor FTP (virtual users)
+│   ├── vsftpd-entrypoint.sh # Wrapper que injeta user_config_dir no config
+│   └── user_conf/           # Per-user vsftpd configs (local_root por camera)
 ├── .env.example
 └── .gitignore
 ```
 
 ## API
 
+Todas as rotas (exceto `/health`) exigem autenticacao via header `Authorization: Bearer <API_KEY>` ou query param `?key=<API_KEY>`.
+
 ### `GET /health`
 
-Health check sem autenticacao. Para monitoramento e uptime checks.
+Health check sem autenticacao.
 
 ```bash
-curl https://snapshots.seudominio.com/health
+curl http://host:8080/health
 # {"status":"ok"}
 ```
 
 ### `GET /snapshots/{courtId}/latest`
 
-Retorna o snapshot mais recente da quadra especificada.
+Retorna o snapshot **mais recente** da quadra (ordenado pelo nome do arquivo). Imagens com upload incompleto (sem marcador JPEG `FF D9`) sao ignoradas.
 
-**Headers obrigatorios:**
-```
-Authorization: Bearer <API_KEY>
-```
-
-**Parametros:**
-| Parametro | Tipo | Descricao |
-|-----------|------|-----------|
-| `courtId` | UUID | Identificador da quadra (formato `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) |
-
-**Respostas:**
-
-| Status | Quando | Body |
-|--------|--------|------|
-| `200`  | Imagem retornada com sucesso | `image/jpeg` (binario) |
-| `400`  | Court ID com formato invalido | `{"error": "invalid court ID"}` |
-| `401`  | API key ausente ou invalida | `{"error": "unauthorized"}` |
-| `404`  | Quadra nao encontrada ou sem snapshot | `{"error": "court not found"}` ou `{"error": "no snapshot available"}` |
-| `500`  | Erro de I/O | `{"error": "internal error"}` |
-
-**Headers da resposta 200:**
-```
-Content-Type: image/jpeg
-Cache-Control: no-store
-X-Snapshot-File: snap_20260307_143300.jpg
-```
-
-**Exemplo:**
 ```bash
-curl -H "Authorization: Bearer SUA_API_KEY" \
-  https://snapshots.seudominio.com/snapshots/abc12345-1234-5678-9abc-def012345678/latest \
-  -o snapshot.jpg
+curl -H "Authorization: Bearer <KEY>" http://host:8080/snapshots/<courtId>/latest -o snap.jpg
+```
+
+| Status | Quando |
+|--------|--------|
+| `200`  | Imagem retornada (`image/jpeg`) |
+| `400`  | Court ID invalido |
+| `401`  | API key ausente ou invalida |
+| `404`  | Quadra nao encontrada ou sem snapshot disponivel |
+
+### `GET /snapshots/{courtId}/list`
+
+Lista todos os snapshots da quadra em ordem decrescente (mais recente primeiro), com contagem, tamanho e URL para abrir cada arquivo.
+
+```bash
+curl -H "Authorization: Bearer <KEY>" http://host:8080/snapshots/<courtId>/list
+```
+
+```json
+{
+  "court_id": "372a8e8d-...",
+  "count": 14,
+  "files": [
+    {
+      "filename": "snap_20260531_120000.jpg",
+      "size_bytes": 78528,
+      "created_at": "2026-05-31 12:00:00",
+      "open_url": "/snapshots/372a8e8d-.../file/snap_20260531_120000.jpg"
+    }
+  ]
+}
+```
+
+### `GET /snapshots/{courtId}/file/{filename}`
+
+Serve um arquivo de snapshot especifico como `image/jpeg`.
+
+```bash
+curl -H "Authorization: Bearer <KEY>" http://host:8080/snapshots/<courtId>/file/snap_20260531_120000.jpg -o snap.jpg
+```
+
+### `GET /snapshots/{courtId}/thumbnails`
+
+Pagina HTML com grid visual das ultimas 100 imagens (mais recente primeiro). Cada thumbnail tem 200px de largura com link para a imagem full size. Util para monitoramento visual rapido.
+
+```
+http://host:8080/snapshots/<courtId>/thumbnails?key=<API_KEY>
 ```
 
 ## Configuracao
@@ -107,25 +126,23 @@ Variaveis de ambiente (ver `.env.example`):
 | Variavel | Default | Descricao |
 |----------|---------|-----------|
 | `PORT` | `8080` | Porta do servidor HTTP |
-| `SNAPSHOTS_DIR` | `/snapshots` | Diretorio raiz onde as cameras gravam os snapshots |
-| `API_KEY` | — (obrigatorio) | Chave para autenticar requests na API |
-| `DELETE_AFTER_SERVE` | `true` | Apagar imagens apos servir (evita acumulo em disco) |
-| `VPS_PUBLIC_IP` | — | IP publico da VPS (usado pelo vsftpd no modo passivo) |
+| `SNAPSHOTS_DIR` | `/snapshots` | Diretorio raiz dos snapshots |
+| `API_KEY` | — (obrigatorio) | Chave para autenticar requests |
+| `DELETE_AFTER_SERVE` | `true` | Apagar imagens apos servir via `/latest` |
 
 ## Seguranca
 
-- **Autenticacao** — API key via header `Authorization: Bearer <key>`, comparacao com `crypto/subtle.ConstantTimeCompare` (protege contra timing attacks)
-- **FTP isolado** — cada camera tem user Linux proprio, chroot na pasta da quadra, sem shell (`/usr/sbin/nologin`)
+- **Autenticacao** — API key via header ou query param, comparacao com `crypto/subtle.ConstantTimeCompare`
+- **FTP isolado** — virtual users com `local_root` por usuario, cada camera so acessa o diretorio da sua quadra
 - **Validacao de input** — court ID aceita apenas UUID valido via regex
-- **Sem acumulo** — imagens deletadas apos servir, disco nunca cresce
-- **HTTPS** — Nginx como reverse proxy com certificado Let's Encrypt
-- **Firewall** — apenas portas 21 (FTP), 30000-30100 (FTP passivo), 80 (redirect), 443 (HTTPS)
+- **Integridade** — imagens incompletas (sem marcador JPEG EOI `FF D9`) nao sao servidas
+- **Firewall** — apenas portas 21 (FTP), 30000-30100 (FTP passivo), 8080 (API)
 
 ## Caracteristicas tecnicas
 
 - **Go 1.22+** com roteamento nativo (`net/http` ServeMux com path parameters)
 - **Zero dependencias externas** — stdlib pura
-- **Cleanup assincrono** — arquivos deletados em goroutine apos envio da resposta (nao bloqueia o client)
+- **Validacao JPEG** — verifica marcador EOI (`FF D9`) nos ultimos 2 bytes antes de servir, evitando imagens parciais durante upload
 - **Logging** — middleware registra metodo, path, status code e duracao de cada request
 - **Timeouts** — ReadTimeout 10s, WriteTimeout 30s, IdleTimeout 60s
 - **Multi-stage Docker build** — imagem final baseada em Alpine (~15MB)
@@ -135,14 +152,13 @@ Variaveis de ambiente (ver `.env.example`):
 ### Pre-requisitos
 
 - VPS com Docker e Docker Compose instalados
-- Dominio apontando para o IP da VPS (ex: `snapshots.seudominio.com`)
 
 ### Passos
 
 1. Clonar o repositorio na VPS:
    ```bash
-   git clone git@github.com:nandokferrari/court-snapshots.git
-   cd court-snapshots
+   git clone git@github.com:nandokferrari/court-snapshots.git /opt/court-snapshots
+   cd /opt/court-snapshots
    ```
 
 2. Configurar variaveis de ambiente:
@@ -151,72 +167,47 @@ Variaveis de ambiente (ver `.env.example`):
    # editar .env com valores reais
    ```
 
-3. Gerar certificado SSL:
-   ```bash
-   certbot certonly --standalone -d snapshots.seudominio.com
-   ```
-
-4. Subir os containers:
+3. Subir os containers:
    ```bash
    cd deploy && docker compose up -d
    ```
 
-5. Configurar renovacao automatica do certificado:
-   ```bash
-   # Adicionar ao crontab
-   0 3 * * * /caminho/deploy/certbot-renew.sh
-   ```
-
 ### Cadastro de nova camera
 
-1. Na VPS, criar user FTP para a quadra:
+1. Criar arquivo de configuracao FTP para o usuario em `deploy/user_conf/<ftp_user>`:
+   ```
+   local_root=/snapshots/court-<court-uuid>
+   ```
+
+2. Adicionar o usuario FTP nas variaveis de ambiente do vsftpd no `docker-compose.yml`
+
+3. Recriar o container vsftpd:
    ```bash
-   ./ftpusers/manage.sh add <court-uuid> <senha>
+   docker compose up -d --force-recreate vsftpd
    ```
 
-2. Na camera Intelbras VIP, configurar FTP:
-   - Servidor: IP da VPS
+4. Configurar a camera/ESP:
+   - Host: IP da VPS
    - Porta: 21
-   - Usuario: `cam_XXXXXXXX` (primeiros 8 chars do UUID)
-   - Senha: a senha definida no passo anterior
-   - Path: `/`
-
-3. No Supabase (tabela `courts`), preencher `camera_snapshot_url`:
-   ```
-   https://snapshots.seudominio.com/snapshots/<court-uuid>/latest
-   ```
-
-4. Pronto — o pipeline de analise ja inclui a quadra no proximo ciclo
-
-### Desativar uma camera
-
-Basta limpar o campo `camera_snapshot_url` no banco. A camera pode continuar mandando FTP sem problema — as imagens serao ignoradas e eventualmente limpas.
+   - Usuario e senha conforme configurado
+   - Path: `/` (o `local_root` direciona para o diretorio correto)
 
 ## Estrutura de pastas FTP
 
 ```
 /snapshots/
-├── court-{uuid-1}/              <- home do user cam_xxxxxxx1
-│   ├── snap_20260307_143200.jpg
-│   └── snap_20260307_143300.jpg
-├── court-{uuid-2}/              <- home do user cam_xxxxxxx2
-│   └── snap_20260307_143200.jpg
+├── court-{uuid-1}/              <- local_root do user cam_xxx
+│   ├── snap_20260531_120000.jpg
+│   └── snap_20260531_120030.jpg
+├── court-{uuid-2}/              <- local_root do user cam_yyy
+│   └── snap_20260531_120000.jpg
 ```
 
-Cada camera grava na raiz da sua pasta (chroot). O nome do arquivo deve conter timestamp para garantir ordenacao correta — as cameras Intelbras fazem isso nativamente.
+Cada camera grava na raiz do seu FTP (o `local_root` por usuario direciona para a pasta correta). O nome do arquivo deve conter timestamp para garantir ordenacao correta.
 
 ## Monitoramento
 
-- **Health check** externo (UptimeRobot ou similar) em `GET /health`
-- **Disk usage** — com `DELETE_AFTER_SERVE=true`, disco nunca deve passar de poucos MB
+- **Health check** externo em `GET /health`
+- **Thumbnails** — `GET /snapshots/{courtId}/thumbnails?key=...` para visualizar os snapshots recebidos
+- **List** — `GET /snapshots/{courtId}/list?key=...` para contagem e detalhes dos arquivos
 - **Logs** — `docker compose logs -f app` para acompanhar requests em tempo real
-- Se uma quadra parar de receber snapshots, o pipeline de IA recebe 404 e registra como erro
-
-## Custos estimados
-
-| Item | Custo |
-|------|-------|
-| VPS Hetzner CX22 (2vCPU, 2GB RAM, 40GB) | ~4 EUR/mes |
-| Dominio (se necessario) | ~10 USD/ano |
-| Let's Encrypt | Gratis |
-| **Total** | **~5 USD/mes** |
